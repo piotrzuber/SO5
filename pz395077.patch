@@ -1,0 +1,696 @@
+diff -rupN old-mfs/usr/src/minix/fs/mfs/inode.c new-mfs/usr/src/minix/fs/mfs/inode.c
+--- old-mfs/usr/src/minix/fs/mfs/inode.c	2014-09-13 23:56:50.000000000 +0200
++++ new-mfs/usr/src/minix/fs/mfs/inode.c	2019-06-07 00:53:19.000000000 +0200
+@@ -23,6 +23,9 @@
+ #include <minix/vfsif.h>
+ #include <assert.h>
+ 
++#define B_MODE_MASK 0x80000000 // mask for flagging B mode in i_mtime
++#define B_MODE_DISABLE_MASK 0x7FFFFFFF // mask for disabling B mode
++
+ static void addhash_inode(struct inode *node);
+ 
+ static void free_inode(dev_t dev, ino_t numb);
+@@ -41,7 +44,7 @@ int fs_putnode(void)
+ 
+   struct inode *rip;
+   int count;
+-  
++
+   rip = find_inode(fs_dev, fs_m_in.m_vfs_fs_putnode.inode);
+ 
+   if(!rip) {
+@@ -62,7 +65,7 @@ int fs_putnode(void)
+   }
+ 
+   /* Decrease reference counter, but keep one reference; it will be consumed by
+-   * put_inode(). */ 
++   * put_inode(). */
+   rip->i_count -= count - 1;
+   put_inode(rip);
+ 
+@@ -83,9 +86,9 @@ void init_inode_cache()
+ 
+   /* init free/unused list */
+   TAILQ_INIT(&unused_inodes);
+-  
++
+   /* init hash lists */
+-  for (rlp = &hash_inodes[0]; rlp < &hash_inodes[INODE_HASH_SIZE]; ++rlp) 
++  for (rlp = &hash_inodes[0]; rlp < &hash_inodes[INODE_HASH_SIZE]; ++rlp)
+       LIST_INIT(rlp);
+ 
+   /* add free inodes to unused/free list */
+@@ -99,10 +102,10 @@ void init_inode_cache()
+ /*===========================================================================*
+  *				addhash_inode   			     *
+  *===========================================================================*/
+-static void addhash_inode(struct inode *node) 
++static void addhash_inode(struct inode *node)
+ {
+   int hashi = (int) (node->i_num & INODE_HASH_MASK);
+-  
++
+   /* insert into hash table */
+   LIST_INSERT_HEAD(&hash_inodes[hashi], node, i_hash);
+ }
+@@ -111,7 +114,7 @@ static void addhash_inode(struct inode *
+ /*===========================================================================*
+  *				unhash_inode      			     *
+  *===========================================================================*/
+-static void unhash_inode(struct inode *node) 
++static void unhash_inode(struct inode *node)
+ {
+   /* remove from hash table */
+   LIST_REMOVE(node, i_hash);
+@@ -127,7 +130,7 @@ struct inode *get_inode(
+ )
+ {
+ /* Find the inode in the hash table. If it is not there, get a free inode
+- * load it from the disk if it's necessary and put on the hash list 
++ * load it from the disk if it's necessary and put on the hash list
+  */
+   register struct inode *rip;
+   int hashi;
+@@ -159,7 +162,7 @@ struct inode *get_inode(
+   /* If not free unhash it */
+   if (rip->i_num != NO_ENTRY)
+       unhash_inode(rip);
+-  
++
+   /* Inode is not unused any more */
+   TAILQ_REMOVE(&unused_inodes, rip, i_unused);
+ 
+@@ -175,7 +178,7 @@ struct inode *get_inode(
+ 
+   /* Add to hash */
+   addhash_inode(rip);
+-  
++
+   return(rip);
+ }
+ 
+@@ -201,7 +204,7 @@ struct inode *find_inode(
+           return(rip);
+       }
+   }
+-  
++
+   return(NULL);
+ }
+ 
+@@ -230,11 +233,11 @@ register struct inode *rip;	/* pointer t
+ 		/* Ignore errors by truncate_inode in case inode is a block
+ 		 * special or character special file.
+ 		 */
+-		(void) truncate_inode(rip, (off_t) 0); 
++		(void) truncate_inode(rip, (off_t) 0);
+ 		rip->i_mode = I_NOT_ALLOC;     /* clear I_TYPE field */
+ 		IN_MARKDIRTY(rip);
+ 		free_inode(rip->i_dev, rip->i_num);
+-	} 
++	}
+ 
+         rip->i_mountpoint = FALSE;
+ 	if (IN_ISDIRTY(rip)) rw_inode(rip, WRITING);
+@@ -359,7 +362,7 @@ register struct inode *rip;	/* pointer t
+ /* Various system calls are required by the standard to update atime, ctime,
+  * or mtime.  Since updating a time requires sending a message to the clock
+  * task--an expensive business--the times are marked for update by setting
+- * bits in i_update.  When a stat, fstat, or sync is done, or an inode is 
++ * bits in i_update.  When a stat, fstat, or sync is done, or an inode is
+  * released, update_times() may be called to actually fill in the times.
+  */
+ 
+@@ -372,7 +375,15 @@ register struct inode *rip;	/* pointer t
+   cur_time = clock_time();
+   if (rip->i_update & ATIME) rip->i_atime = cur_time;
+   if (rip->i_update & CTIME) rip->i_ctime = cur_time;
+-  if (rip->i_update & MTIME) rip->i_mtime = cur_time;
++  if (rip->i_update & MTIME) {
++	//	if (rip->i_mtime & B_MODE_MASK) {
++			rip->i_mtime = cur_time;
++	//		rip->i_mtime |= B_MODE_MASK;
++		//} else {
++			//rip->i_mtime = cur_time;
++			//rip->i_mtime &= B_MODE_DISABLE_MASK;
++		//}
++	}
+   rip->i_update = 0;		/* they are all up-to-date now */
+ }
+ 
+@@ -410,7 +421,7 @@ int rw_flag;			/* READING or WRITING */
+    */
+   assert(sp->s_version == V3);
+   new_icopy(rip, dip2, rw_flag, sp->s_native);
+-  
++
+   put_block(bp, INODE_BLOCK);
+   IN_MARKCLEAN(rip);
+ }
+@@ -468,4 +479,3 @@ struct inode *ip;		/* The inode to be du
+ 
+   ip->i_count++;
+ }
+-
+Binarne pliki old-mfs/usr/src/minix/fs/mfs/inode.o i new-mfs/usr/src/minix/fs/mfs/inode.o różnią się
+diff -rupN old-mfs/usr/src/minix/fs/mfs/link.c new-mfs/usr/src/minix/fs/mfs/link.c
+--- old-mfs/usr/src/minix/fs/mfs/link.c	2019-06-07 05:47:03.000000000 +0200
++++ new-mfs/usr/src/minix/fs/mfs/link.c	2019-06-07 05:39:04.000000000 +0200
+@@ -9,6 +9,9 @@
+ #include <sys/param.h>
+ 
+ #define SAME 1000
++#define RM_MODES 3
++#define B_MODE_MASK 0x80000000 // mask for flagging B mode in i_mtime
++#define B_MODE_DISABLE_MASK 0x7FFFFFFF // mask for disabling B mode
+ 
+ 
+ static int freesp_inode(struct inode *rip, off_t st, off_t end);
+@@ -45,11 +48,11 @@ int fs_link()
+   		       (vir_bytes) 0, (vir_bytes) string, (size_t) len);
+   if (r != OK) return r;
+   NUL(string, len, sizeof(string));
+-  
++
+   /* Temporarily open the file. */
+   if( (rip = get_inode(fs_dev, fs_m_in.m_vfs_fs_link.inode)) == NULL)
+ 	  return(EINVAL);
+-  
++
+   /* Check to see if the file has maximum number of links already. */
+   r = OK;
+   if(rip->i_nlinks >= LINK_MAX)
+@@ -57,7 +60,7 @@ int fs_link()
+ 
+   /* Only super_user may link to directories. */
+   if(r == OK)
+-	  if( (rip->i_mode & I_TYPE) == I_DIRECTORY && caller_uid != SU_UID) 
++	  if( (rip->i_mode & I_TYPE) == I_DIRECTORY && caller_uid != SU_UID)
+ 		  r = EPERM;
+ 
+   /* If error with 'name', return the inode. */
+@@ -87,7 +90,7 @@ int fs_link()
+ 	  put_inode(new_ip);
+ 	  r = EEXIST;
+   }
+-  
++
+   /* Try to link. */
+   if(r == OK)
+ 	  r = search_dir(ip, string, &rip->i_num, ENTER, IGN_PERM);
+@@ -98,7 +101,7 @@ int fs_link()
+ 	  rip->i_update |= CTIME;
+ 	  IN_MARKDIRTY(rip);
+   }
+-  
++
+   /* Done.  Release both inodes. */
+   put_inode(rip);
+   put_inode(ip);
+@@ -120,18 +123,18 @@ int fs_unlink()
+   int r;
+   char string[MFS_NAME_MAX];
+   phys_bytes len;
+-  
++
+   /* Copy the last component */
+   len = min(fs_m_in.m_vfs_fs_unlink.path_len, sizeof(string));
+   r = sys_safecopyfrom(VFS_PROC_NR, fs_m_in.m_vfs_fs_unlink.grant,
+   		       (vir_bytes) 0, (vir_bytes) string, (size_t) len);
+   if (r != OK) return r;
+   NUL(string, len, sizeof(string));
+-  
++
+   /* Temporarily open the dir. */
+   if((rldirp = get_inode(fs_dev, fs_m_in.m_vfs_fs_unlink.inode)) == NULL)
+ 	  return(EINVAL);
+-  
++
+   /* The last directory exists.  Does the file also exist? */
+   rip = advance(rldirp, string, IGN_PERM);
+   r = err_code;
+@@ -146,7 +149,7 @@ int fs_unlink()
+ 	put_inode(rldirp);
+ 	return(r);
+   }
+-  
++
+   if(rip->i_sp->s_rd_only) {
+   	r = EROFS;
+   }  else if(fs_m_in.m_type == REQ_UNLINK) {
+@@ -177,7 +180,7 @@ int fs_rdlink()
+   register struct inode *rip;  /* target inode */
+   register int r;              /* return value */
+   size_t copylen;
+-  
++
+   copylen = min(fs_m_in.m_vfs_fs_rdlink.mem_size, UMAX_FILE_POS);
+ 
+   /* Temporarily open the file. */
+@@ -200,7 +203,7 @@ int fs_rdlink()
+ 	if (r == OK)
+ 		fs_m_out.m_fs_vfs_rdlink.nbytes = copylen;
+   }
+-  
++
+   put_inode(rip);
+   return(r);
+ }
+@@ -229,7 +232,7 @@ char dir_name[MFS_NAME_MAX];		/* name of
+ 
+   if (strcmp(dir_name, ".") == 0 || strcmp(dir_name, "..") == 0)return(EINVAL);
+   if (rip->i_num == ROOT_INODE) return(EBUSY); /* can't remove 'root' */
+- 
++
+   /* Actually try to unlink the file; fails if parent is mode 0 etc. */
+   if ((r = unlink_file(rldirp, rip, dir_name)) != OK) return r;
+ 
+@@ -254,6 +257,19 @@ char file_name[MFS_NAME_MAX];	/* name of
+ 
+   ino_t numb;			/* inode number */
+   int	r;
++	int mode = -1;
++	int mode_err_code;
++	ino_t mode_numb;
++	size_t name_len;
++	struct inode* mode_inode;
++	int i;
++	ino_t backup_numb;
++	int backup_err_code;
++	struct inode* backup_inode;
++	const char* c_ext = ".bak";
++	size_t ext_len = strlen(c_ext);
++	char ext_file_name[MFS_NAME_MAX];
++	char* modes[RM_MODES] = {"A.mode", "B.mode", "C.mode"};
+ 
+   /* If rip is not NULL, it is used to get faster access to the inode. */
+   if (rip == NULL) {
+@@ -265,13 +281,145 @@ char file_name[MFS_NAME_MAX];	/* name of
+ 	dup_inode(rip);		/* inode will be returned with put_inode */
+   }
+ 
+-  r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++	name_len = 0;
++	while (name_len < MFS_NAME_MAX && file_name[name_len] != 0) {
++		name_len++;
++	}
++
++	i = 0;
++	while (i < RM_MODES) {
++		mode_err_code = search_dir(dirp, modes[i], &mode_numb, LOOK_UP, IGN_PERM);
++		if (mode_err_code == OK) {
++			mode_inode = get_inode(dirp->i_dev, (int) mode_numb);
++			if (mode_inode != NULL && S_ISREG(mode_inode->i_mode)) {
++				mode = i;
++				if (name_len == 6 && memcmp(file_name, modes[i], name_len) == 0) {
++					mode = -1;
++				}
++				put_inode(mode_inode);
++				break;
++			}
++		} else if (mode_err_code != ENOENT) {
++			r = mode_err_code;
++			mode = -2;
++		}
++		i++;
++	}
++
++	switch (mode) {
++		case 0:								//rm A mode
++			r = EPERM;
++			break;
++
++		case 1:
++			if (rip->i_mtime & B_MODE_MASK) { // file is set to delete
++				r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++
++				if (r == OK) {
++					rip->i_nlinks--;	/* entry deleted from parent's dir */
++					rip->i_update |= CTIME;
++					rip->i_mtime &= B_MODE_DISABLE_MASK;
++					IN_MARKDIRTY(rip);
++				}
++			} else {
++				r = EINPROGRESS;
++				rip->i_mtime |= B_MODE_MASK;
++				IN_MARKDIRTY(rip);
++			}
++			break;
++
++		case 2:							  //rm C mode
++
++			if (name_len < 3) { // name too short to contain ".bak" substring
++				// C mode removing
++				memcpy(ext_file_name, file_name, name_len);
++				memcpy(ext_file_name + name_len, c_ext, ext_len);
++				backup_err_code = search_dir(dirp, ext_file_name, &backup_numb, LOOK_UP, IGN_PERM);
++				if (backup_err_code == OK) {
++					backup_inode = get_inode(dirp->i_dev, (int) backup_numb);
++					if (S_ISREG(backup_inode->i_mode)) {
++						unlink_file(dirp, backup_inode, ext_file_name);
++						r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++										/* shouldn't go wrong. */
++						if(r == OK)
++							(void) search_dir(dirp, ext_file_name, &numb, ENTER,
++								  	IGN_PERM);
++					} else {
++						r = EISDIR;
++					}
++
++			        put_inode(backup_inode);
++				} else if (backup_err_code == ENOENT) {
++					backup_inode = NULL;
++					r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++									/* shouldn't go wrong. */
++					if(r == OK)
++						(void) search_dir(dirp, ext_file_name, &numb, ENTER,
++									IGN_PERM);
++				} else {
++					r = backup_err_code;
++				}
++			} else {
++				if (memcmp(file_name + name_len - ext_len, c_ext, ext_len) == 0) { // .bak suffix
++					// standard removing
++					r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++
++					if (r == OK) {
++						rip->i_nlinks--;	/* entry deleted from parent's dir */
++						rip->i_update |= CTIME;
++						IN_MARKDIRTY(rip);
++					}
++				} else if (memcmp(file_name + name_len - ext_len, c_ext, ext_len) != 0) { // no .bak suffix
++					if (name_len + ext_len > MFS_NAME_MAX) { // file name too long for .bak suffix
++						r = ENAMETOOLONG;
++					} else { // name can contain extension suffix
++						// C mode removing
++						memcpy(ext_file_name, file_name, name_len);
++						memcpy(ext_file_name + name_len, c_ext, ext_len);
++						backup_err_code = search_dir(dirp, ext_file_name, &backup_numb, LOOK_UP, IGN_PERM);
++						if (backup_err_code == OK) {
++							backup_inode = get_inode(dirp->i_dev, (int) backup_numb);
++							if (S_ISREG(backup_inode->i_mode)) {
++								unlink_file(dirp, backup_inode, ext_file_name);
++								r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++												/* shouldn't go wrong. */
++								if(r == OK)
++									(void) search_dir(dirp, ext_file_name, &numb, ENTER,
++										  	IGN_PERM);
++							} else {
++								r = EISDIR;
++							}
++
++			                put_inode(backup_inode);
++						} else if (backup_err_code == ENOENT) {
++							backup_inode = NULL;
++							r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++											/* shouldn't go wrong. */
++							if(r == OK)
++								(void) search_dir(dirp, ext_file_name, &numb, ENTER,
++											IGN_PERM);
++						} else {
++							r = backup_err_code;
++						}
++					}
++				}
++			}
++			break;
++
++		case -1:
++			r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++
++			if (r == OK) {
++				rip->i_nlinks--;	/* entry deleted from parent's dir */
++				rip->i_update |= CTIME;
++				IN_MARKDIRTY(rip);
++			}
++			break;
++		default:
++			break;
++	}
++
+ 
+-  if (r == OK) {
+-	rip->i_nlinks--;	/* entry deleted from parent's dir */
+-	rip->i_update |= CTIME;
+-	IN_MARKDIRTY(rip);
+-  }
+ 
+   put_inode(rip);
+   return(r);
+@@ -293,14 +441,14 @@ int fs_rename()
+   char old_name[MFS_NAME_MAX], new_name[MFS_NAME_MAX];
+   ino_t numb;
+   phys_bytes len;
+-  
++
+   /* Copy the last component of the old name */
+   len = min( (unsigned) fs_m_in.m_vfs_fs_rename.len_old, sizeof(old_name));
+   r = sys_safecopyfrom(VFS_PROC_NR, fs_m_in.m_vfs_fs_rename.grant_old,
+   		       (vir_bytes) 0, (vir_bytes) old_name, (size_t) len);
+   if (r != OK) return r;
+   NUL(old_name, len, sizeof(old_name));
+-  
++
+   /* Copy the last component of the new name */
+   len = min( (unsigned) fs_m_in.m_vfs_fs_rename.len_new, sizeof(new_name));
+   r = sys_safecopyfrom(VFS_PROC_NR, fs_m_in.m_vfs_fs_rename.grant_new,
+@@ -308,7 +456,7 @@ int fs_rename()
+   if (r != OK) return r;
+   NUL(new_name, len, sizeof(new_name));
+ 
+-  /* Get old dir inode */ 
++  /* Get old dir inode */
+   if ((old_dirp = get_inode(fs_dev, fs_m_in.m_vfs_fs_rename.dir_old)) == NULL)
+ 	return(err_code);
+ 
+@@ -327,7 +475,7 @@ int fs_rename()
+ 	return(r);
+   }
+ 
+-  /* Get new dir inode */ 
++  /* Get new dir inode */
+   if ((new_dirp = get_inode(fs_dev, fs_m_in.m_vfs_fs_rename.dir_new)) == NULL){
+         put_inode(old_ip);
+         put_inode(old_dirp);
+@@ -340,7 +488,7 @@ int fs_rename()
+   		return(ENOENT);
+ 	}
+   }
+-  
++
+   new_ip = advance(new_dirp, new_name, IGN_PERM); /* not required to exist */
+ 
+   /* However, if the check failed because the file does exist, don't continue.
+@@ -372,7 +520,7 @@ int fs_rename()
+ 			put_inode(new_superdirp);
+ 			if(next_new_superdirp == new_superdirp) {
+ 				put_inode(new_superdirp);
+-				break;	
++				break;
+ 			}
+ 			if(err_code == ELEAVEMOUNT) {
+ 				/* imitate that we are back at the root,
+@@ -387,34 +535,38 @@ int fs_rename()
+ 				r = EINVAL;
+ 				break;
+ 			}
+-		} 	
+-	}	
+-	  
++		}
++	}
++
+ 	/* The old or new name must not be . or .. */
+ 	if(strcmp(old_name, ".") == 0 || strcmp(old_name, "..") == 0 ||
+ 	   strcmp(new_name, ".") == 0 || strcmp(new_name, "..") == 0) {
+ 		r = EINVAL;
+ 	}
+-	/* Both parent directories must be on the same device. 
++	/* Both parent directories must be on the same device.
+ 	if(old_dirp->i_dev != new_dirp->i_dev) r = EXDEV; */
+ 
+ 	/* Some tests apply only if the new path exists. */
+ 	if(new_ip == NULL) {
+-		/* don't rename a file with a file system mounted on it. 
++		/* don't rename a file with a file system mounted on it.
+ 		if (old_ip->i_dev != old_dirp->i_dev) r = EXDEV;*/
+ 		if (odir && new_dirp->i_nlinks >= LINK_MAX &&
+-		    !same_pdir && r == OK) { 
++		    !same_pdir && r == OK) {
+ 			r = EMLINK;
+ 		}
+ 	} else {
+ 		if(old_ip == new_ip) r = SAME; /* old=new */
+-		
++		if (r == SAME) {
++			new_ip->i_mtime ^= B_MODE_MASK;
++			IN_MARKDIRTY(new_ip);
++		}
++
+ 		ndir = ((new_ip->i_mode & I_TYPE) == I_DIRECTORY);/* dir ? */
+ 		if(odir == TRUE && ndir == FALSE) r = ENOTDIR;
+ 		if(odir == FALSE && ndir == TRUE) r = EISDIR;
+ 	}
+   }
+-  
++
+   /* If a process has another root directory than the system root, we might
+    * "accidently" be moving it's working directory to a place where it's
+    * root directory isn't a super directory of it anymore. This can make
+@@ -430,9 +582,9 @@ int fs_rename()
+   if(r == OK) {
+ 	if(new_ip != NULL) {
+ 		/* There is already an entry for 'new'. Try to remove it. */
+-		if(odir) 
++		if(odir)
+ 			r = remove_dir(new_dirp, new_ip, new_name);
+-		else 
++		else
+ 			r = unlink_file(new_dirp, new_ip, new_name);
+ 	}
+ 	/* if r is OK, the rename will succeed, while there is now an
+@@ -446,7 +598,7 @@ int fs_rename()
+ 	   * the rename will succeed.
+ 	   */
+ 	numb = old_ip->i_num;		/* inode number of old file */
+-	  
++
+ 	if(same_pdir) {
+ 		r = search_dir(old_dirp, old_name, NULL, DELETE, IGN_PERM);
+ 						/* shouldn't go wrong. */
+@@ -473,7 +625,7 @@ int fs_rename()
+ 		IN_MARKDIRTY(new_dirp);
+ 	}
+   }
+-	
++
+   /* Release the inodes. */
+   put_inode(old_dirp);
+   put_inode(old_ip);
+@@ -491,7 +643,7 @@ int fs_ftrunc(void)
+   struct inode *rip;
+   off_t start, end;
+   int r;
+-  
++
+   if( (rip = find_inode(fs_dev, fs_m_in.m_vfs_fs_ftrunc.inode)) == NULL)
+ 	  return(EINVAL);
+ 
+@@ -503,13 +655,13 @@ int fs_ftrunc(void)
+ 
+     if (end == 0)
+ 	  r = truncate_inode(rip, start);
+-    else 
++    else
+ 	  r = freesp_inode(rip, start, end);
+   }
+ 
+   return(r);
+ }
+-    
++
+ 
+ /*===========================================================================*
+  *				truncate_inode				     *
+@@ -523,7 +675,7 @@ off_t newsize;			/* inode must become th
+  * extra space is a hole that reads as zeroes.
+  *
+  * Nothing special has to happen to file pointers if inode is opened in
+- * O_APPEND mode, as this is different per fd and is checked when 
++ * O_APPEND mode, as this is different per fd and is checked when
+  * writing is done.
+  */
+   int r;
+@@ -589,7 +741,7 @@ off_t start, end;		/* range of bytes to
+   zero_first = end % zone_size && end < rip->i_size;
+   if(start/zone_size == (end-1)/zone_size && (zero_last || zero_first)) {
+ 	zerozone_range(rip, start, end-start);
+-  } else { 
++  } else {
+ 	/* First zero unused part of partly used zones. */
+ 	if(zero_last)
+ 		zerozone_half(rip, start, LAST_HALF, zone_size);
+@@ -700,4 +852,3 @@ off_t len;
+ 	len -= bytes;
+   }
+ }
+-
+Binarne pliki old-mfs/usr/src/minix/fs/mfs/link.o i new-mfs/usr/src/minix/fs/mfs/link.o różnią się
+Binarne pliki old-mfs/usr/src/minix/fs/mfs/mfs i new-mfs/usr/src/minix/fs/mfs/mfs różnią się
+diff -rupN old-mfs/usr/src/minix/fs/mfs/stadir.c new-mfs/usr/src/minix/fs/mfs/stadir.c
+--- old-mfs/usr/src/minix/fs/mfs/stadir.c	2014-09-13 23:56:50.000000000 +0200
++++ new-mfs/usr/src/minix/fs/mfs/stadir.c	2019-06-07 02:00:25.000000000 +0200
+@@ -7,6 +7,9 @@
+ #include "super.h"
+ #include <minix/vfsif.h>
+ 
++#define B_MODE_MASK 0x80000000 // mask for flagging B mode in i_mtime
++#define B_MODE_DISABLE_MASK 0x7FFFFFFF // mask for disabling B mode
++
+ /*===========================================================================*
+  *				estimate_blocks				     *
+  *===========================================================================*/
+@@ -73,7 +76,7 @@ static int stat_inode(
+   statbuf.st_rdev = (s ? (dev_t)rip->i_zone[0] : NO_DEV);
+   statbuf.st_size = rip->i_size;
+   statbuf.st_atime = rip->i_atime;
+-  statbuf.st_mtime = rip->i_mtime;
++  statbuf.st_mtime = rip->i_mtime & B_MODE_DISABLE_MASK;
+   statbuf.st_ctime = rip->i_ctime;
+   statbuf.st_blksize = lmfs_fs_block_size();
+   statbuf.st_blocks = estimate_blocks(rip);
+@@ -115,7 +118,7 @@ int fs_statvfs()
+   /* Copy the struct to user space. */
+   r = sys_safecopyto(fs_m_in.m_source, fs_m_in.m_vfs_fs_statvfs.grant, 0,
+ 			(vir_bytes) &st, (phys_bytes) sizeof(st));
+-  
++
+   return(r);
+ }
+ 
+@@ -129,9 +132,8 @@ int fs_stat()
+ 
+   if ((rip = get_inode(fs_dev, fs_m_in.m_vfs_fs_stat.inode)) == NULL)
+ 	return(EINVAL);
+-  
++
+   r = stat_inode(rip, fs_m_in.m_source, fs_m_in.m_vfs_fs_stat.grant);
+   put_inode(rip);		/* release the inode */
+   return(r);
+ }
+-
+Binarne pliki old-mfs/usr/src/minix/fs/mfs/stadir.o i new-mfs/usr/src/minix/fs/mfs/stadir.o różnią się
+diff -rupN old-mfs/usr/src/minix/fs/mfs/time.c new-mfs/usr/src/minix/fs/mfs/time.c
+--- old-mfs/usr/src/minix/fs/mfs/time.c	2014-09-13 23:56:50.000000000 +0200
++++ new-mfs/usr/src/minix/fs/mfs/time.c	2019-06-07 02:00:07.000000000 +0200
+@@ -3,6 +3,8 @@
+ #include <sys/stat.h>
+ #include <minix/vfsif.h>
+ 
++#define B_MODE_MASK 0x80000000 // mask for flagging B mode in i_mtime
++#define B_MODE_DISABLE_MASK 0x7FFFFFFF // mask for disabling B mode
+ 
+ /*===========================================================================*
+  *				fs_utime				     *
+@@ -55,7 +57,13 @@ int fs_utime()
+ 		 * cases fs_m_in.m_vfs_fs_utime.modnsec < 0 || fs_m_in.m_vfs_fs_utime.modnsec >= 1E9
+ 		 * are caught by VFS to cooperate with old instances of MFS
+ 		 */
+-		rip->i_mtime = fs_m_in.m_vfs_fs_utime.modtime;
++    if (rip->i_mtime & B_MODE_MASK) {
++ 			rip->i_mtime = fs_m_in.m_vfs_fs_utime.modtime;
++ 			rip->i_mtime |= B_MODE_MASK;
++ 		} else {
++ 			rip->i_mtime = fs_m_in.m_vfs_fs_utime.modtime;
++ 			rip->i_mtime &= B_MODE_DISABLE_MASK;
++ 		}
+ 		/*
+ 		 * MFS does not support better than second resolution,
+ 		 * so we discard MODNSEC to round down
+@@ -69,4 +77,3 @@ int fs_utime()
+   put_inode(rip);
+   return(r);
+ }
+-
+Binarne pliki old-mfs/usr/src/minix/fs/mfs/time.o i new-mfs/usr/src/minix/fs/mfs/time.o różnią się
